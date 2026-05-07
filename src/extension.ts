@@ -6,11 +6,15 @@ import * as path from 'path';
 const execFileAsync = promisify(execFile);
 
 // Keep prompt input bounded so the model receives a stable, digestible payload.
-const MAX_SECTION_LENGTH = 4096;
+const MAX_SECTION_LENGTH = 1024;
+// Diff is the most useful signal for commit message generation, so allow more room here.
+const MAX_DIFF_SECTION_LENGTH = 6144;
+// Hard cap for the final prompt sent to Gemini.
+const MAX_PROMPT_LENGTH = 12000;
 // Soft cap for git stdout so large diffs do not blow up the prompt or buffers.
-const GIT_STDOUT_SOFT_LIMIT = 4096;
-// Commit messages can include a subject plus a body, so keep enough headroom for longer replies.
-const MAX_OUTPUT_TOKENS = 4096;
+const GIT_STDOUT_SOFT_LIMIT = 8192;
+// Commit messages are short; keep generation bounded so the model does not drift into long prose.
+const MAX_OUTPUT_TOKENS = 1024;
 // Use the Gemini 3 Flash preview model for short commit messages.
 const MODEL_CANDIDATES = ['gemini-2.5-flash'] as const;
 
@@ -188,13 +192,13 @@ export async function activate(context: vscode.ExtensionContext) {
 	const activeRuns = new Map<string, WorkspaceRunEntry>();
 	let runCounter = 0;
 
-	const disposable = vscode.commands.registerCommand('commit-message-gene-by-gemini-cli.runGeminiCLICmd', async () => {
+	const disposable = vscode.commands.registerCommand('commit-message-gene-by-gemini-cli.runGeminiCLICmd', async (...commandArgs: unknown[]) => {
 		let currentRunId = 0;
 		let workspaceKey = '';
 
 		try {
 			debug(`extension start: node=${process.version} platform=${process.platform} cwd=${process.cwd()}`);
-			const workspaceDir = await resolveWorkspaceDirectory();
+			const workspaceDir = await resolveWorkspaceDirectory(commandArgs);
 			if (!workspaceDir) {
 				vscode.window.showErrorMessage('No workspace folder is open, so Git context cannot be gathered.');
 				return;
@@ -235,7 +239,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			debug(`finalMessage length=${finalMessage?.length ?? 0}`);
 			if (finalMessage) {
 				finalMessage = normalizeCommitMessage(finalMessage);
-				await setCommitMessage(finalMessage, output, workspaceDir);
+				await setCommitMessage(finalMessage, output, workspaceDir, commandArgs);
 			} else {
 				reportError(M.errors.noResult(), output);
 			}
@@ -491,22 +495,22 @@ function normalizeCommitMessage(message: string): string {
 	return normalized;
 }
 
-async function setCommitMessage(message: string, output: vscode.OutputChannel, workspaceDir?: string) {
+async function setCommitMessage(message: string, output: vscode.OutputChannel, workspaceDir?: string, commandArgs: unknown[] = []) {
 	try {
 		await vscode.commands.executeCommand('workbench.view.scm');
 		const gitApi = await getGitApi();
 		if (gitApi) {
 			const repos = (gitApi.repositories ?? []) as GitRepositoryLike[];
-			const targetRepo = selectRepositoryForCommit(repos, workspaceDir);
+			const targetRepo = selectRepositoryForCommit(repos, workspaceDir, commandArgs);
 			if (targetRepo?.inputBox) {
 				targetRepo.inputBox.value = message;
 				return;
 			}
 		}
 
-		const scmAny = vscode.scm as unknown as { inputBox?: { value: string } };
-		if (scmAny && scmAny.inputBox) {
-			scmAny.inputBox.value = message;
+		const contextInputBox = findInputBoxFromCommandArgs(commandArgs);
+		if (contextInputBox) {
+			contextInputBox.value = message;
 			return;
 		}
 
@@ -517,9 +521,21 @@ async function setCommitMessage(message: string, output: vscode.OutputChannel, w
 	}
 }
 
-function selectRepositoryForCommit(repos: GitRepositoryLike[], workspaceDir?: string) {
+function selectRepositoryForCommit(repos: GitRepositoryLike[], workspaceDir?: string, commandArgs: unknown[] = []) {
 	if (!repos || repos.length === 0) {
 		return undefined;
+	}
+
+	for (const fsPath of extractFsPathsFromCommandArgs(commandArgs)) {
+		const byExactContext = findRepoByFsPath(repos, fsPath);
+		if (byExactContext) {
+			return byExactContext;
+		}
+
+		const byContainingContext = findRepoContainingFsPath(repos, fsPath);
+		if (byContainingContext) {
+			return byContainingContext;
+		}
 	}
 
 	if (workspaceDir) {
@@ -556,6 +572,105 @@ function normalizeFsPath(fsPath: string): string {
 function findRepoByFsPath(repos: GitRepositoryLike[], targetFsPath: string) {
 	const normalizedTarget = normalizeFsPath(targetFsPath);
 	return repos.find(repo => repo?.rootUri?.fsPath && normalizeFsPath(repo.rootUri.fsPath) === normalizedTarget);
+}
+
+function findRepoContainingFsPath(repos: GitRepositoryLike[], targetFsPath: string) {
+	const normalizedTarget = normalizeFsPath(targetFsPath);
+	return repos
+		.filter(repo => {
+			if (!repo?.rootUri?.fsPath) {
+				return false;
+			}
+			const normalizedRoot = normalizeFsPath(repo.rootUri.fsPath);
+			return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(`${normalizedRoot}${path.sep}`);
+		})
+		.sort((a, b) => (b.rootUri?.fsPath.length ?? 0) - (a.rootUri?.fsPath.length ?? 0))[0];
+}
+
+function extractFsPathsFromCommandArgs(commandArgs: unknown[]): string[] {
+	const paths: string[] = [];
+	const seen = new Set<unknown>();
+
+	const visit = (value: unknown, depth: number) => {
+		if (!value || depth > 4 || typeof value !== 'object') {
+			return;
+		}
+
+		if (seen.has(value)) {
+			return;
+		}
+		seen.add(value);
+
+		if (Array.isArray(value)) {
+			value.forEach(item => visit(item, depth + 1));
+			return;
+		}
+
+		const maybeUri = value as { fsPath?: unknown };
+		if (typeof maybeUri.fsPath === 'string') {
+			paths.push(maybeUri.fsPath);
+		}
+
+		const record = value as Record<string, unknown>;
+		for (const key of ['rootUri', 'resourceUri', 'uri', 'sourceUri']) {
+			visit(record[key], depth + 1);
+		}
+		for (const key of ['sourceControl', 'repository', 'repo']) {
+			visit(record[key], depth + 1);
+		}
+	};
+
+	commandArgs.forEach(arg => visit(arg, 0));
+	return [...new Set(paths)];
+}
+
+function findInputBoxFromCommandArgs(commandArgs: unknown[]) {
+	const seen = new Set<unknown>();
+
+	const visit = (value: unknown, depth: number): { value: string } | undefined => {
+		if (!value || depth > 4 || typeof value !== 'object') {
+			return undefined;
+		}
+
+		if (seen.has(value)) {
+			return undefined;
+		}
+		seen.add(value);
+
+		if (Array.isArray(value)) {
+			for (const item of value) {
+				const found = visit(item, depth + 1);
+				if (found) {
+					return found;
+				}
+			}
+			return undefined;
+		}
+
+		const record = value as Record<string, unknown>;
+		const inputBox = record.inputBox as { value?: unknown } | undefined;
+		if (inputBox && typeof inputBox.value === 'string') {
+			return inputBox as { value: string };
+		}
+
+		for (const key of ['sourceControl', 'repository', 'repo']) {
+			const found = visit(record[key], depth + 1);
+			if (found) {
+				return found;
+			}
+		}
+
+		return undefined;
+	};
+
+	for (const arg of commandArgs) {
+		const found = visit(arg, 0);
+		if (found) {
+			return found;
+		}
+	}
+
+	return undefined;
 }
 
 function reportError(message: string, output: vscode.OutputChannel) {
@@ -604,9 +719,13 @@ async function getGitApi(): Promise<any | undefined> {
 	return typeof exportsAny?.getAPI === 'function' ? exportsAny.getAPI(1) : exportsAny;
 }
 
-async function resolveWorkspaceDirectory(): Promise<string | undefined> {
+async function resolveWorkspaceDirectory(commandArgs: unknown[] = []): Promise<string | undefined> {
 	const gitApi = await getGitApi();
 	const repos = (gitApi?.repositories ?? []) as GitRepositoryLike[];
+	const contextRepo = selectRepositoryForCommit(repos, undefined, commandArgs);
+	if (contextRepo?.rootUri?.fsPath) {
+		return contextRepo.rootUri.fsPath;
+	}
 	const selectedRepo = repos.find(repo => repo?.ui?.selected);
 	if (selectedRepo?.rootUri?.fsPath) {
 		return selectedRepo.rootUri.fsPath;
@@ -667,14 +786,14 @@ async function collectGitContext(cwd: string): Promise<string> {
 		formatSection('Repository root', repoRoot),
 		formatSection('Current branch', branch),
 		formatSection('Status (--short --branch)', status),
-		formatSection(diffSectionTitle, diffBody),
+		formatSection(diffSectionTitle, diffBody, MAX_DIFF_SECTION_LENGTH),
 		formatSection('Untracked files', untrackedFiles),
 		formatSection('Recent commits', recentCommits),
 	].join('\n\n');
 }
 
-function formatSection(title: string, body: string): string {
-	const safeBody = truncateForPrompt(body || 'N/A', MAX_SECTION_LENGTH);
+function formatSection(title: string, body: string, limit: number = MAX_SECTION_LENGTH): string {
+	const safeBody = truncateForPrompt(body || 'N/A', limit);
 	return `### ${title}\n${safeBody}`;
 }
 
@@ -682,7 +801,9 @@ function truncateForPrompt(text: string, limit: number): string {
 	if (text.length <= limit) {
 		return text;
 	}
-	return `${text.slice(0, limit)}\n... (truncated to ${limit} chars)`;
+	const suffix = `\n... (truncated to ${limit} chars)`;
+	const cutoff = Math.max(limit - suffix.length, 0);
+	return `${text.slice(0, cutoff)}${suffix}`;
 }
 
 function isHeadMissingError(message: string): boolean {
@@ -788,7 +909,7 @@ function buildPrompt(gitContext: string): string {
 		: [];
 	const introLines = resolvedIntro.length > 0 ? resolvedIntro : defaultIntro;
 
-	return [...introLines, gitContext].join('\n\n');
+	return truncateForPrompt([...introLines, gitContext].join('\n\n'), MAX_PROMPT_LENGTH);
 }
 
 function isJapanese(): boolean {

@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.3.9
+
+- Improved commit message insertion so SCM command context is preferred when selecting the target repository and input box, which makes the extension behave better in multi-root workspaces and nested Git repositories. Contributed by: [@andreescocard](https://github.com/andreescocard)
+
 ## 0.3.8
 
 - Adjusted internal parameters: increased `MAX_SECTION_LENGTH` to 4096 and tightened `GIT_STDOUT_SOFT_LIMIT` to 4096 to ensure stable prompt sizes.
