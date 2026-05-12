@@ -3,6 +3,8 @@
 ## 0.3.10
 
 - Fixed the extension so it works correctly again in AWS Kiro.
+- Replaced the old authentication path with direct Gemini API calls through `@google/genai`.
+- Updated package metadata and README content for the Gemini API flow.
 
 ## 0.3.9
 

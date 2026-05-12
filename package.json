@@ -1,8 +1,8 @@
 {
   "publisher": "komiyamma",
   "name": "commit-message-gene-by-gemini-cli",
-  "displayName": "Commit Message Gene by Gemini CLI",
-  "description": "Generates commit messages from Git changes using Gemini CLI authentication via @google/gemini-cli-core.",
+  "displayName": "Commit Message Gene by Gemini",
+  "description": "Generates commit messages from Git changes using the Gemini API.",
   "version": "0.3.10",
   "repository": {
     "type": "git",
@@ -18,7 +18,7 @@
     "Other"
   ],
   "dependencies": {
-    "@google/gemini-cli-core": "0.37.2"
+    "@google/genai": "^1.30.0"
   },
   "activationEvents": [
     "onCommand:commit-message-gene-by-gemini-cli.runGeminiCLICmd"
@@ -29,14 +29,14 @@
   "main": "./out/extension.js",
   "contributes": {
     "configuration": {
-      "title": "Commit message gene by gemini-cli",
+      "title": "Commit message gene by Gemini",
       "properties": {
         "commitMessageGeneGemini.prompt.intro.en": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "markdownDescription": "English instructions shown to Gemini CLI before the Git context. Each array item becomes a paragraph with a blank line between entries.",
+          "markdownDescription": "English instructions shown to Gemini before the Git context. Each array item becomes a paragraph with a blank line between entries.",
           "default": [
             "You are an assistant that drafts commit messages using the provided Git information.",
             "All required Git data has already been collected below. Do not run additional git commands.",
@@ -49,7 +49,7 @@
           "items": {
             "type": "string"
           },
-          "markdownDescription": "Japanese instructions shown to Gemini CLI before the Git context. Each array item becomes a paragraph with a blank line between entries.",
+          "markdownDescription": "Japanese instructions shown to Gemini before the Git context. Each array item becomes a paragraph with a blank line between entries.",
           "default": [
             "あなたは収集されたGit情報でコミットメッセージを作成するアシスタントです。",
             "必要なGitデータはすべて下に用意済みです。追加のgitコマンドは実行しないでください。",
@@ -62,7 +62,7 @@
     "commands": [
       {
         "command": "commit-message-gene-by-gemini-cli.runGeminiCLICmd",
-        "title": "Commit message generation by gemini-cli",
+        "title": "Commit message generation by Gemini",
         "icon": "$(wand)"
       }
     ],

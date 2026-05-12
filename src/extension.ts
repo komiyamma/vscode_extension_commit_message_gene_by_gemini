@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
+import { createHash } from 'crypto';
 
 const execFileAsync = promisify(execFile);
 
@@ -15,7 +16,7 @@ const MAX_PROMPT_LENGTH = 12000;
 const GIT_STDOUT_SOFT_LIMIT = 8192;
 // Commit messages are short; keep generation bounded so the model does not drift into long prose.
 const MAX_OUTPUT_TOKENS = 1024;
-// Retry only transient Gemini/Code Assist capacity failures.
+// Retry only transient Gemini capacity failures.
 const CAPACITY_RETRY_DELAY_MS = 5000;
 const CAPACITY_RETRY_ATTEMPTS = 1;
 // Use the Gemini 3 Flash preview model for short commit messages.
@@ -27,32 +28,17 @@ type GitRepositoryLike = {
 	ui?: { selected?: boolean };
 };
 
-type GeminiCoreModule = {
-	AuthType: {
-		LOGIN_WITH_GOOGLE: string;
-		LEGACY_CLOUD_SHELL: string;
-		COMPUTE_ADC: string;
+type GeminiSdkModule = {
+	GoogleGenAI: new (options: { apiKey: string }) => {
+		models: {
+			generateContent(request: unknown): Promise<unknown>;
+		};
 	};
-	getAuthTypeFromEnv: () => string | undefined;
-	createCodeAssistContentGenerator: (
-		httpOptions: { headers?: Record<string, string> },
-		authType: string,
-		config: CodeAssistRuntimeConfig,
-		sessionId?: string,
-	) => Promise<GeminiRuntime['generator']>;
-};
-
-type CodeAssistRuntimeConfig = {
-	getProxy: () => string | undefined;
-	isBrowserLaunchSuppressed: () => boolean;
-	isInteractive: () => boolean;
-	getAcpMode: () => boolean;
-	getValidationHandler: () => undefined;
 };
 
 type GeminiRuntime = {
 	generator: {
-		generateContent(request: unknown, userPromptId: string, role: unknown): Promise<unknown>;
+		generateContent(request: unknown, userPromptId?: string, role?: unknown): Promise<unknown>;
 	};
 	authType: string;
 };
@@ -65,7 +51,6 @@ type WorkspaceRunEntry = {
 
 type WorkspaceClientEntry = {
 	workspaceDir: string;
-	authKey: string;
 	ready: Promise<GeminiRuntime>;
 };
 
@@ -97,31 +82,26 @@ class GeminiClientPool {
 
 		const entry: WorkspaceClientEntry = {
 			workspaceDir,
-			authKey: key,
 			ready: Promise.resolve(undefined as never),
 		};
 
 		entry.ready = (async () => {
-			const core = await loadGeminiCore();
-			const authType = resolveAuthType(core);
-			this.debug(`creating gemini-cli-core code-assist generator: workspaceDir=${workspaceDir} authType=${authType}`);
+			const apiKey = getGeminiApiKey();
+			if (!apiKey) {
+				throw new Error('GEMINI_API_KEY or GOOGLE_API_KEY is required.');
+			}
 
-			const generator = await core.createCodeAssistContentGenerator(
-				{
-					headers: {
-						'User-Agent': 'commit-message-gene-by-gemini-cli',
-					},
-				},
-				authType,
-				createCodeAssistConfig(),
-				workspaceDir,
-			);
+			this.debug(`creating Gemini API key generator: workspaceDir=${workspaceDir}`);
+			const sdk = await loadGeminiSdk();
+			const client = new sdk.GoogleGenAI({ apiKey });
 			const runtime: GeminiRuntime = {
-				generator: generator as GeminiRuntime['generator'],
-				authType: String(authType),
+				generator: {
+					generateContent: (request: unknown) => client.models.generateContent(request),
+				},
+				authType: 'gemini-api-key',
 			};
 
-			this.debug(`gemini-cli-core generator ready: workspaceDir=${workspaceDir} authType=${authType}`);
+			this.debug(`Gemini API key generator ready: workspaceDir=${workspaceDir}`);
 			return runtime;
 		})().catch(async (error) => {
 			this.clients.delete(key);
@@ -141,7 +121,7 @@ class GeminiClientPool {
 			await this.getClient(workspaceDir);
 		})().catch(error => {
 			const message = error instanceof Error ? error.message : String(error);
-			this.debug(`gemini-cli-core prewarm failed: ${message}`);
+			this.debug(`Gemini API key prewarm failed: ${message}`);
 		});
 	}
 
@@ -150,11 +130,15 @@ class GeminiClientPool {
 	}
 
 	private async buildCacheKey(workspaceDir: string): Promise<string> {
-		const core = await loadGeminiCore();
-		const authType = resolveAuthType(core);
+		const apiKey = getGeminiApiKey();
+		if (!apiKey) {
+			throw new Error('GEMINI_API_KEY or GOOGLE_API_KEY is required.');
+		}
+
 		return JSON.stringify({
 			workspaceDir: normalizeFsPath(workspaceDir),
-			authType,
+			authType: 'gemini-api-key',
+			apiKeyHash: hashSecret(apiKey),
 		});
 	}
 }
@@ -170,8 +154,8 @@ const M = {
 		errorSet: (e: string) => (isJapanese() ? `コミットメッセージの設定に失敗しました: ${e}` : `Failed to set commit message: ${e}`),
 	},
 	errors: {
-		noResult: () => (isJapanese() ? 'Gemini CLI core から有効なコミットメッセージを受信できませんでした。' : 'No valid commit message was received from Gemini CLI core.'),
-		failed: (e: string) => (isJapanese() ? `Gemini CLI core の実行に失敗しました: ${e}` : `Failed to run Gemini CLI core: ${e}`),
+		noResult: () => (isJapanese() ? 'Gemini から有効なコミットメッセージを受信できませんでした。' : 'No valid commit message was received from Gemini.'),
+		failed: (e: string) => (isJapanese() ? `Gemini の実行に失敗しました: ${e}` : `Failed to run Gemini: ${e}`),
 	},
 };
 
@@ -274,26 +258,17 @@ export async function deactivate() {
 	clientPool = undefined;
 }
 
-async function loadGeminiCore(): Promise<GeminiCoreModule> {
-	return (await import('@google/gemini-cli-core')) as unknown as GeminiCoreModule;
+async function loadGeminiSdk(): Promise<GeminiSdkModule> {
+	return (await import('@google/genai')) as unknown as GeminiSdkModule;
 }
 
-function resolveAuthType(core: GeminiCoreModule): string {
-	const detected = core.getAuthTypeFromEnv();
-	if (detected === core.AuthType.COMPUTE_ADC || detected === core.AuthType.LEGACY_CLOUD_SHELL) {
-		return core.AuthType.COMPUTE_ADC;
-	}
-	return core.AuthType.LOGIN_WITH_GOOGLE;
+function getGeminiApiKey(): string | undefined {
+	const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+	return key?.trim() || undefined;
 }
 
-function createCodeAssistConfig(): CodeAssistRuntimeConfig {
-	return {
-		getProxy: () => undefined,
-		isBrowserLaunchSuppressed: () => false,
-		isInteractive: () => true,
-		getAcpMode: () => false,
-		getValidationHandler: () => undefined,
-	};
+function hashSecret(secret: string): string {
+	return createHash('sha256').update(secret).digest('hex').slice(0, 12);
 }
 
 function isCurrentRun(activeRuns: Map<string, WorkspaceRunEntry>, workspaceKey: string, runId: number): boolean {
@@ -321,15 +296,15 @@ async function generateCommitMessage(
 
 	let lastError: Error | undefined;
 
-	for (let pass = 0; pass <= CAPACITY_RETRY_ATTEMPTS; pass += 1) {
-		for (let index = 0; index < MODEL_CANDIDATES.length; index += 1) {
-			const model = MODEL_CANDIDATES[index];
-			const request = {
-				...requestBase,
-				model,
-			};
+	for (let index = 0; index < MODEL_CANDIDATES.length; index += 1) {
+		const model = MODEL_CANDIDATES[index];
+		const request = {
+			...requestBase,
+			model,
+		};
 
-			debug(`generateContent request: model=${model} promptLength=${prompt.length} pass=${pass + 1}`);
+		for (let attempt = 0; attempt <= CAPACITY_RETRY_ATTEMPTS; attempt += 1) {
+			debug(`generateContent request: model=${model} promptLength=${prompt.length} attempt=${attempt + 1}`);
 
 			try {
 				const result = await generator.generateContent(request, `commit-message-${Date.now()}`, 'main');
@@ -346,11 +321,12 @@ async function generateCommitMessage(
 			} catch (error) {
 				debug(`generateContent failed: model=${model} error=${describeError(error)}`);
 				lastError = error instanceof Error ? error : new Error(toErrorMessage(error));
-				if (pass < CAPACITY_RETRY_ATTEMPTS && isNoCapacityError(error)) {
+				if (attempt < CAPACITY_RETRY_ATTEMPTS && isNoCapacityError(error)) {
 					debug(`capacity exhausted; retrying same request after ${CAPACITY_RETRY_DELAY_MS}ms: model=${model}`);
 					await delay(CAPACITY_RETRY_DELAY_MS);
 					continue;
 				}
+				break;
 			}
 		}
 	}

@@ -3,6 +3,8 @@
 ## 0.3.10
 
 - AWS Kiro でこの拡張機能が正しく動作するように修正しました。
+- 旧認証経路を廃止し、`@google/genai` 経由の Gemini API 直接呼び出しに変更しました。
+- Gemini API フローに合わせて package メタデータと README を更新しました。
 
 ## 0.3.9
 
