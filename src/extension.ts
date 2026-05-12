@@ -15,8 +15,11 @@ const MAX_PROMPT_LENGTH = 12000;
 const GIT_STDOUT_SOFT_LIMIT = 8192;
 // Commit messages are short; keep generation bounded so the model does not drift into long prose.
 const MAX_OUTPUT_TOKENS = 1024;
+// Retry only transient Gemini/Code Assist capacity failures.
+const CAPACITY_RETRY_DELAY_MS = 5000;
+const CAPACITY_RETRY_ATTEMPTS = 1;
 // Use the Gemini 3 Flash preview model for short commit messages.
-const MODEL_CANDIDATES = ['gemini-2.5-flash'] as const;
+const MODEL_CANDIDATES = ['gemini-2.5-flash-lite'] as const;
 
 type GitRepositoryLike = {
 	rootUri?: vscode.Uri;
@@ -318,7 +321,7 @@ async function generateCommitMessage(
 
 	let lastError: Error | undefined;
 
-	for (let pass = 0; pass < 2; pass += 1) {
+	for (let pass = 0; pass <= CAPACITY_RETRY_ATTEMPTS; pass += 1) {
 		for (let index = 0; index < MODEL_CANDIDATES.length; index += 1) {
 			const model = MODEL_CANDIDATES[index];
 			const request = {
@@ -343,13 +346,36 @@ async function generateCommitMessage(
 			} catch (error) {
 				debug(`generateContent failed: model=${model} error=${describeError(error)}`);
 				lastError = error instanceof Error ? error : new Error(toErrorMessage(error));
+				if (pass < CAPACITY_RETRY_ATTEMPTS && isNoCapacityError(error)) {
+					debug(`capacity exhausted; retrying same request after ${CAPACITY_RETRY_DELAY_MS}ms: model=${model}`);
+					await delay(CAPACITY_RETRY_DELAY_MS);
+					continue;
+				}
 			}
 		}
-
-		break;
 	}
 
 	throw lastError ?? new Error(`All model attempts failed: ${MODEL_CANDIDATES.join(', ')}`);
+}
+
+function delay(ms: number): Promise<void> {
+	return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isNoCapacityError(error: unknown): boolean {
+	const diagnostics = getErrorDiagnostics(error);
+	const haystack = [
+		diagnostics.message,
+		diagnostics.code,
+		diagnostics.status,
+		diagnostics.stack,
+		describeError(error),
+	]
+		.filter(value => value !== undefined)
+		.join('\n')
+		.toLowerCase();
+
+	return haystack.includes('no capacity available') || haystack.includes('model_capacity_exhausted');
 }
 
 function describeResult(result: unknown): string {
