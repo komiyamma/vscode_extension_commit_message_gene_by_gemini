@@ -1,5 +1,12 @@
 # Change Log
 
+## 0.3.11
+
+- 生成処理を Gemini CLI Core から `@google/genai` による Gemini API 直接呼び出しへ変更しました。
+- エディタ起動前に `GEMINI_API_KEY` または `GOOGLE_API_KEY` が必要になりました。
+- Gemini の一時的なキャパシティエラーに対する短いリトライを追加しました。
+- Gemini API フローに合わせて README と package メタデータを更新し、macOS / Linux 対応バッジを追加しました。
+
 ## 0.3.10
 
 - AWS Kiro でこの拡張機能が正しく動作するように修正しました。

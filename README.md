@@ -1,8 +1,10 @@
 [Japanese README](README.ja.md)
 
-[![Version](https://img.shields.io/badge/version-v0.3.10-4094ff.svg)](https://marketplace.visualstudio.com/items?itemName=komiyamma.commit-message-gene-by-gemini-cli)
+[![Version](https://img.shields.io/badge/version-v0.3.11-4094ff.svg)](https://marketplace.visualstudio.com/items?itemName=komiyamma.commit-message-gene-by-gemini-cli)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat)](LICENSE)
 ![Windows 10|11](https://img.shields.io/badge/Windows-_10_|_11-6479ff.svg?logo=windows&logoColor=white)
+![macOS](https://img.shields.io/badge/macOS-OK-6479ff.svg?logo=apple&logoColor=white)
+![Linux](https://img.shields.io/badge/Linux-OK-6479ff.svg?logo=linux&logoColor=white)
 
 Primary target: VS Code-compatible editors such as VS Code, VSCodium, Kiro, and Antigravity.
 

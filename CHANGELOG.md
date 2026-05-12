@@ -1,5 +1,12 @@
 # Change Log
 
+## 0.3.11
+
+- Switched generation from Gemini CLI Core to direct Gemini API calls using `@google/genai`.
+- Now requires `GEMINI_API_KEY` or `GOOGLE_API_KEY` before the editor starts.
+- Added a short retry for transient Gemini capacity errors.
+- Updated README and package metadata for the Gemini API flow, and added macOS/Linux support badges.
+
 ## 0.3.10
 
 - Fixed the extension so it works correctly again in AWS Kiro.

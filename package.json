@@ -3,7 +3,7 @@
   "name": "commit-message-gene-by-gemini-cli",
   "displayName": "Commit Message Gene by Gemini",
   "description": "Generates commit messages from Git changes using the Gemini API.",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "repository": {
     "type": "git",
     "url": "https://github.com/komiyamma/vscode_extension_commit_message_gene_by_gemini_cli"
